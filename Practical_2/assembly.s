@@ -103,5 +103,5 @@ GPIOB_BASE:  		.word 0x48000400
 MODER_OUTPUT: 		.word 0x5555
 
 @ TODO: Add your own values for these delays
-LONG_DELAY_CNT:     .word 700000     @ ~0.7 seconds
-SHORT_DELAY_CNT:    .word 300000     @ ~0.3 seconds
+LONG_DELAY_CNT:     .word 1400000     @ ~0.7 seconds
+SHORT_DELAY_CNT:    .word 600000     @ ~0.3 seconds
