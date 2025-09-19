@@ -48,7 +48,10 @@ uint64_t checksum = 0;
 uint32_t start_time = 0;
 uint32_t end_time = 0;
 uint32_t execution_time;
-#define MAX_ITER 100
+uint32_t size = 1920;  // width and height of the image
+uint32_t max_iter[5] = {100, 250, 500, 750, 1000}; // different iteration sizes
+uint32_t cycles = 0;
+float throughput = 0;
 
 /* USER CODE END PV */
 
@@ -59,6 +62,10 @@ static void MX_GPIO_Init(void);
 //TODO: Define any function prototypes you might need such as the calculate Mandelbrot function among others
 uint64_t calculate_mandelbrot_fixed_point_arithmetic(int width, int height, int max_iterations);
 uint64_t calculate_mandelbrot_double(int width, int height, int max_iterations);
+static inline void DWT_Init(void);
+uint64_t mandelbrot_tile_fixed(int W, int H, int x0, int x1, int y0, int y1, int max_iterations);
+uint64_t mandelbrot_tile_double(int W, int H, int x0, int x1, int y0, int y1, int max_iterations);
+
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -103,35 +110,60 @@ int main(void)
   /* USER CODE BEGIN WHILE */
   while (1)
   {
-    /* USER CODE END WHILE */
+      // --- MANUAL SETTINGS ---
+      int W = 128;   // change this manually (128, 160, 192, 224, 256, etc.)
+      int H = 128;   // change this manually
+      const int MAX_ITER = 100;
 
-    /* USER CODE BEGIN 3 */
-	  //TODO: Visual indicator: Turn on LED0 to signal processing start
-	  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_0, GPIO_PIN_SET);
+      // Choose which Mandelbrot implementation to test:
+      // 1 = double, 2 = fixed-point
+      int mode = 2;
 
-	  // record start time
-	  start_time = HAL_GetTick();
+      // --- BENCHMARK START ---
+      HAL_GPIO_WritePin(GPIOB, GPIO_PIN_0, GPIO_PIN_SET); // LED0 = start
 
-	  //TODO: Benchmark and Profile Performance
-	  checksum = calculate_mandelbrot_double(128, 128, MAX_ITER);
+      start_time = HAL_GetTick();
+      DWT_Init(); // works on F4, ignored on F0
+      uint32_t start_cycles = DWT->CYCCNT;
 
-	  // record end time
-	  end_time = HAL_GetTick();
+      uint64_t total_checksum = 0;
 
-	  // Calculate the execution time
-	  execution_time =end_time - start_time;
+      if (mode == 1) {
+          // Double-precision version
+          if (W <= 256 && H <= 256) {
+              total_checksum = calculate_mandelbrot_double(W, H, MAX_ITER);
+          } else {
+              total_checksum = mandelbrot_tile_double(W, H, 0, W, 0, H, MAX_ITER);
+          }
+      }
+      else if (mode == 2) {
+          // Fixed-point version
+          if (W <= 256 && H <= 256) {
+              total_checksum = calculate_mandelbrot_fixed_point_arithmetic(W, H, MAX_ITER);
+          } else {
+              total_checksum = mandelbrot_tile_fixed(W, H, 0, W, 0, H, MAX_ITER);
+          }
+      }
 
-	  //TODO: Visual indicator: Turn on LED1 to signal processing start
-	  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_1, GPIO_PIN_SET);
+      end_time = HAL_GetTick();
+      uint32_t end_cycles = DWT->CYCCNT;
 
-	  //TODO: Keep the LEDs ON for 2s
-	  HAL_Delay(2000);
+      execution_time = end_time - start_time;
+      cycles = (end_cycles > start_cycles) ? (end_cycles - start_cycles) : 0;
+      throughput = (float)(W * H) / (execution_time / 1000.0f);
+      checksum = total_checksum;
+      size = W;
 
-	  //TODO: Turn OFF LEDs
-	  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_0, GPIO_PIN_RESET);
-	  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_1, GPIO_PIN_RESET);
+      HAL_GPIO_WritePin(GPIOB, GPIO_PIN_1, GPIO_PIN_SET); // LED1 = done
+      HAL_Delay(1000);
+      HAL_GPIO_WritePin(GPIOB, GPIO_PIN_0|GPIO_PIN_1, GPIO_PIN_RESET);
 
+      // BREAKPOINT: record results -> (W, H, mode, execution_time, cycles, throughput, checksum)
+
+      break; // stop after one run
   }
+
+
   /* USER CODE END 3 */
 }
 
@@ -281,6 +313,67 @@ uint64_t calculate_mandelbrot_double(int width, int height, int max_iterations){
         }
     return mandelbrot_sum;
 }
+
+// Mandelbrot for a sub-tile (fixed-point arithmetic)
+uint64_t mandelbrot_tile_fixed(int W, int H, int x0, int x1, int y0, int y1, int max_iterations) {
+    const int64_t SCALE = 1000000LL;
+    const int64_t SCALE_4P0 = 4000000LL;  // 4.0 * SCALE
+    uint64_t sum = 0;
+
+    for (int py = y0; py < y1; py++) {
+        int64_t y_coord = ((int64_t)py * 2000000LL) / H - 1000000LL; // (py/H)*2 - 1
+        for (int px = x0; px < x1; px++) {
+            int64_t x_coord = ((int64_t)px * 3500000LL) / W - 2500000LL; // (px/W)*3.5 - 2.5
+            int64_t xi = 0, yi = 0;
+            int iter = 0;
+
+            while (iter < max_iterations) {
+                int64_t xi_sq = (xi * xi) / SCALE;
+                int64_t yi_sq = (yi * yi) / SCALE;
+
+                if (xi_sq + yi_sq > SCALE_4P0) break;
+
+                int64_t xt = xi_sq - yi_sq + x_coord;
+                yi = ((2 * xi * yi) / SCALE) + y_coord;
+                xi = xt;
+
+                iter++;
+            }
+            sum += iter;
+        }
+    }
+    return sum;
+}
+
+// Mandelbrot for a sub-tile (used in scalability when W,H are large)
+uint64_t mandelbrot_tile_double(int W, int H, int x0, int x1, int y0, int y1, int max_iterations) {
+    uint64_t sum = 0;
+    for (int py = y0; py < y1; py++) {
+        double y_coord = ((double)py * 2.0 / (double)H) - 1.0;
+        for (int px = x0; px < x1; px++) {
+            double x_coord = ((double)px * 3.5 / (double)W) - 2.5;
+            double xi = 0.0, yi = 0.0;
+            int iter = 0;
+            while (iter < max_iterations && (xi*xi + yi*yi <= 4.0)) {
+                double xt = xi*xi - yi*yi + x_coord;
+                yi = 2.0*xi*yi + y_coord;
+                xi = xt;
+                iter++;
+            }
+            sum += iter;
+        }
+    }
+    return sum;
+}
+
+
+// Function to init DWT cycle counter
+static inline void DWT_Init(void) {
+    CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk; // enable DWT
+    DWT->CYCCNT = 0;                                // reset counter
+    DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk;            // enable counter
+}
+
 /* USER CODE END 4 */
 
 /**
